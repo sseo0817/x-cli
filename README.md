@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 # Make the CLI available (optional PATH update)
 chmod +x bin/x
-export PATH="$PWD/bin:$PATH"  # optional; see alternatives below
+scripts/setup_path.sh        # adds this repo's bin/ to PATH in ~/.bashrc
 
 # Put your credentials in .env
 cat > .env << 'EOF'
@@ -140,6 +140,8 @@ Project layout:
   - `python -m xcli.cli schedule monitor --since "2025-09-14"`
 - Or create a one-time alias (shell session only):
   - `alias x="$PWD/bin/x"`
+
+Recommended: run `scripts/setup_path.sh` once to permanently add this repo's `bin/` to your PATH in `~/.bashrc`. After that, `x` is available in new shells without activating the venv; the launcher prefers the repo's venv Python when present.
 
 ## Managing Cron from the CLI
 

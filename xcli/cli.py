@@ -12,6 +12,7 @@ import stat
 from .schedule import add_job, list_jobs, get_job, update_job, remove_job
 from .runner import run_once, runner_status
 from .api import post_tweet, ApiError, get_tweet, auth_status
+from .utils.openai_client import LLMClient
 from .cronctl import cron_on, cron_off, cron_status
 from .util import append_journal, now_utc, gen_id, read_journal, resolve_time_spec, parse_time_to_utc, iso_utc_to_local_str, resolve_since, journal_find_by_id, cron_log_default_path, iso_utc_to_local_hms
 
@@ -65,11 +66,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             if delta.total_seconds() < 0:
                 delta = delta * 0
             rel = humanize_delta(int(delta.total_seconds()))
+        # Compute simple length stats
+        wc = len(args.text.split())
+        cc = len(args.text)
+        cc_str = str(cc)
+        if _use_color():
+            cc_str = f"\033[31m{cc}\033[0m" if cc > 280 else f"\033[32m{cc}\033[0m"
         # Preview with clear separators for multi-line text
         preview = (
             "\033[1m\033[36mAbout to schedule:\033[0m\n"
             + f"  at:   {local_spec} (tz={tz_used}) -> utc:{utc_iso}\n"
             + (f"  when: {rel}\n" if rel else "")
+            + f"  length: words={wc} chars={cc_str}\n"
             + "  text:\n"
             + "\033[2m" + ("─" * 40) + "\033[0m\n"
             + f"{args.text}\n"
@@ -742,6 +750,26 @@ def build_parser() -> argparse.ArgumentParser:
     pl_follow.add_argument("--tz", help="IANA timezone for timestamps (default: HKT)")
     pl_follow.set_defaults(func=cmd_logs_follow)
 
+    # ai utilities
+    pai = sub.add_parser(
+        "ai",
+        help="AI utilities",
+        description="AI helpers like proofreading drafts before posting.",
+    )
+    pai_sub = pai.add_subparsers(dest="ai_cmd", required=True)
+    pai_pf = pai_sub.add_parser(
+        "proofread",
+        help="proofread a draft for X",
+        description=(
+            "Proofread and punch up a draft post while keeping its structure/style. "
+            "Never uses em dashes. Highlights length relative to X limits."
+        ),
+    )
+    pai_pf.add_argument("--text", help="draft text; omit to read from stdin")
+    pai_pf.add_argument("--model", default="gpt-5-mini", help="LLM model (default: gpt-5-mini)")
+    pai_pf.add_argument("--json", action="store_true", help="output JSON instead of formatted text")
+    pai_pf.set_defaults(func=cmd_ai_proofread)
+
     return p
 
 
@@ -792,6 +820,65 @@ def cmd_tweet_show(args: argparse.Namespace) -> int:
     print(f"Tweet ID: {tid}")
     print(f"URL: https://x.com/i/web/status/{tid}")
     print("Text:\n" + text)
+    return 0
+
+
+def cmd_ai_proofread(args: argparse.Namespace) -> int:
+    # Gather input text
+    draft = args.text
+    if not draft:
+        try:
+            draft = sys.stdin.read()
+        except Exception:
+            draft = None
+    if not draft or not draft.strip():
+        print("--text is required (or provide via stdin)", file=sys.stderr)
+        return 2
+    draft = draft.strip()
+
+    # Build LLM client
+    model = args.model
+    llm = LLMClient(model=model)
+
+    system_prompt = (
+        "You are a world-class editor for X (Twitter) posts. "
+        "The user will provide a draft. Your task:\n"
+        "- Correct grammar and fix unnatural expressions.\n"
+        "- Make it punchy and concise for X.\n"
+        "- Preserve the draft's structure and stylistic feel as much as possible.\n"
+        "- Never use em dashes (—); prefer commas, periods, or hyphens instead.\n"
+        "Output only the improved text, no commentary."
+    )
+
+    try:
+        improved = llm.chat(system=system_prompt, user=draft)
+    except Exception as e:
+        if args.json:
+            print_json({"ok": False, "error": str(e)})
+        else:
+            print(f"\033[31mproofread failed: {e}\033[0m", file=sys.stderr)
+        return 1
+
+    text_out = str(improved).strip()
+    words = len(text_out.split())
+    chars = len(text_out)
+
+    if args.json:
+        print_json({"ok": True, "text": text_out, "words": words, "chars": chars, "model": model})
+        return 0
+
+    # Pretty output
+    print("\033[1m\033[36mProofread Draft\033[0m")
+    print("\033[2m" + ("─" * 40) + "\033[0m")
+    print(text_out)
+    print("\033[2m" + ("─" * 40) + "\033[0m")
+    wc_str = f"words={words} chars={chars}"
+    if _use_color():
+        if chars > 280:
+            wc_str = f"words={words} chars=\033[31m{chars}\033[0m"
+        else:
+            wc_str = f"words={words} chars=\033[32m{chars}\033[0m"
+    print(wc_str)
     return 0
 
 

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Dispatch to Python CLI
+# Dispatch to Python CLI, preferring repo venv if present
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-exec python3 -m xcli.cli "$@"
-
+VENV_PY="$REPO_DIR/.venv/bin/python"
+if [ -x "$VENV_PY" ]; then
+  exec "$VENV_PY" -m xcli.cli "$@"
+else
+  exec python3 -m xcli.cli "$@"
+fi
