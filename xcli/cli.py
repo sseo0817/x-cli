@@ -720,7 +720,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="show posted history from journal",
         description="Displays posted tweets (both scheduled and immediate) since a given time.",
     )
-    pm.add_argument("--since", help="filter to entries with posted_at >= this time (ISO or 'YYYY-MM-DD HH:MM')")
+    pm.add_argument(
+        "--since",
+        default="1d",
+        help="filter to entries with posted_at >= this time (ISO or 'YYYY-MM-DD HH:MM' or relative like 1d, 12h). Default: 1d",
+    )
     pm.add_argument("--tz", help="IANA timezone name for display (default: HKT)")
     pm.add_argument("--json", action="store_true", help="output raw JSON entries")
     pm.add_argument("--repo", default=".", help="path to repo root for cron status (default: .)")
@@ -765,10 +769,23 @@ def build_parser() -> argparse.ArgumentParser:
             "Never uses em dashes. Highlights length relative to X limits."
         ),
     )
-    pai_pf.add_argument("--text", help="draft text; omit to read from stdin")
+    pai_pf.add_argument("text_parts", nargs="*", help="draft text as positional words (join with spaces)")
+    pai_pf.add_argument("--text", help="draft text (overrides positional); omit to read from stdin")
     pai_pf.add_argument("--model", default="gpt-5-mini", help="LLM model (default: gpt-5-mini)")
     pai_pf.add_argument("--json", action="store_true", help="output JSON instead of formatted text")
     pai_pf.set_defaults(func=cmd_ai_proofread)
+
+    # short alias: draft
+    pd = sub.add_parser(
+        "draft",
+        help="proofread a draft (alias of ai proofread)",
+        description="Short alias for 'ai proofread' to punch up a draft.",
+    )
+    pd.add_argument("text_parts", nargs="*", help="draft text as positional words (join with spaces)")
+    pd.add_argument("--text", help="draft text (overrides positional); omit to read from stdin")
+    pd.add_argument("--model", default="gpt-5-mini", help="LLM model (default: gpt-5-mini)")
+    pd.add_argument("--json", action="store_true", help="output JSON instead of formatted text")
+    pd.set_defaults(func=cmd_ai_proofread)
 
     return p
 
@@ -825,7 +842,10 @@ def cmd_tweet_show(args: argparse.Namespace) -> int:
 
 def cmd_ai_proofread(args: argparse.Namespace) -> int:
     # Gather input text
+    # Prefer explicit --text, else join positional parts, else stdin
     draft = args.text
+    if (not draft or not draft.strip()) and getattr(args, 'text_parts', None):
+        draft = " ".join(args.text_parts).strip()
     if not draft:
         try:
             draft = sys.stdin.read()

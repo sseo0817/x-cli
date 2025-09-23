@@ -57,7 +57,14 @@ Notes:
 ### Monitor scheduled items
 
 ```
-x schedule monitor --since "2025-09-14"
+# By default shows the last 1 day
+x schedule monitor
+
+# Or specify a window or time explicitly
+x schedule monitor --since 3d
+x schedule monitor --since "2025-09-14 10:00"
+
+# Look up a specific job
 x schedule monitor --id <job_id>
 ```
 
@@ -75,6 +82,27 @@ x schedule remove --id <job_id>
 
 ```
 x post --text "Ship it" --max-retries 2
+```
+
+### AI Proofreading (Draft)
+
+Use AI to proofread and tighten a draft before posting. The default model is `gpt-5-mini` and requires `OPENAI_API_KEY` in your environment or `.env`.
+
+```
+# Short alias (recommended)
+x draft Improve this draft please
+
+# With explicit model
+x draft Make this punchy --model gpt-5-mini
+
+# Using --text (overrides positional words)
+x draft some words --text "Use this exact draft instead"
+
+# From stdin (multi-line)
+echo "Line 1\nLine 2" | x draft
+
+# JSON output
+x draft Rewrite this --json
 ```
 
 ### Process due items once
@@ -137,7 +165,7 @@ Project layout:
 - Run with a relative path:
   - `./bin/x schedule assign --text "..." --at "2025-09-14 21:00"`
 - Or use Python directly:
-  - `python -m xcli.cli schedule monitor --since "2025-09-14"`
+  - `python -m xcli.cli schedule monitor`  # defaults to --since 1d
 - Or create a one-time alias (shell session only):
   - `alias x="$PWD/bin/x"`
 
