@@ -211,6 +211,14 @@ Shows presence of OAuth 1.0a keys (required for posting), optional Bearer token 
   - Use `--repo` to specify which repo path to check cron status against.
   - Timestamps are displayed as `YYYY-MM-DD HH:MM:SS` in your chosen timezone.
 
+### Details by ID
+
+- Show the full text and timing for an item (scheduled or posted):
+  - `x detail <id>`
+  - Options:
+    - `--tz` to display the time in a specific timezone (default: HKT)
+    - `--json` for structured output
+
 ## Logs
 
 - Follow cron-run output with timestamps:

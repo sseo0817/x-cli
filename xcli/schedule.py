@@ -65,7 +65,9 @@ def update_job(job_id: str, *, text: Optional[str], at: Optional[str], tz_name: 
             if text is not None:
                 j["text"] = text
             if at is not None:
-                time_utc_iso, tz_used = parse_time_to_utc(at, tz_name or j.get("tz"))
+                # Anchor relative specs (e.g., '1d CA evening') to the user's tz when --tz is not provided,
+                # instead of the job's existing tz, to match monitor semantics.
+                time_utc_iso, tz_used = parse_time_to_utc(at, tz_name or "HKT")
                 j["time_utc"] = time_utc_iso
                 j["tz"] = tz_used
             # Recompute idempotency key if content or time changed

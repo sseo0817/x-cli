@@ -116,7 +116,12 @@ def resolve_time_spec(ts: str, tz_name: Optional[str]) -> Tuple[str, str, bool]:
         remainder = m_off.group(2)
     # Prime time keywords
     # Prime time keywords: always pick a random time within the chosen window
-    kw_local, kw_tz, is_kw = _resolve_prime_time_keyword(remainder, prefer_earliest=False, days_offset=days_offset)
+    kw_local, kw_tz, is_kw = _resolve_prime_time_keyword(
+        remainder,
+        prefer_earliest=False,
+        days_offset=days_offset,
+        anchor_tz=tz_used,
+    )
     if is_kw:
         return kw_local, kw_tz or tz_used, True
     if re.fullmatch(r"\d{1,2}:\d{2}", ts):
@@ -160,7 +165,13 @@ def _match_region(token: str) -> Optional[str]:
     return None
 
 
-def _resolve_prime_time_keyword(spec: str, *, prefer_earliest: bool = False, days_offset: int = 0) -> Tuple[str, Optional[str], bool]:
+def _resolve_prime_time_keyword(
+    spec: str,
+    *,
+    prefer_earliest: bool = False,
+    days_offset: int = 0,
+    anchor_tz: Optional[str] = None,
+) -> Tuple[str, Optional[str], bool]:
     """If spec matches a prime time keyword like 'EU morning', return a concrete
     local ISO time within the next occurrence of that window, and its timezone name.
 
@@ -187,10 +198,39 @@ def _resolve_prime_time_keyword(spec: str, *, prefer_earliest: bool = False, day
     start_h, end_h = _PRIME_WINDOWS[region][1].get(part, (None, None))
     if start_h is None:
         return spec, None, False
-    # Anchor base day with days_offset
-    base_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
+    # Anchor base day with days_offset relative to anchor_tz (user tz) if provided
+    if anchor_tz:
+        atz = default_tz_from_name(anchor_tz)
+        now_anch = datetime.now(atz)
+        user_day_start = now_anch.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
+        user_day_end = user_day_start + timedelta(days=1)
+        # Initial guess: map user's day start to region date
+        region_anchor = user_day_start.astimezone(tzinfo)
+        base_day = region_anchor.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        base_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
     start = base_day.replace(hour=start_h, minute=0, second=0, microsecond=0)
     end = base_day.replace(hour=end_h, minute=0, second=0, microsecond=0)
+    # If anchoring to user's tz, ensure the region window's UTC end falls within the user's anchor UTC day
+    if anchor_tz:
+        u_start_utc = user_day_start.astimezone(timezone.utc)
+        u_end_utc = user_day_end.astimezone(timezone.utc)
+        # Adjust base_day by at most one day to fit end within [u_start_utc, u_end_utc)
+        for _ in range(2):
+            end_utc = end.astimezone(timezone.utc)
+            if end_utc < u_start_utc:
+                # region window too early; move forward a day
+                start += timedelta(days=1)
+                end += timedelta(days=1)
+                base_day += timedelta(days=1)
+                continue
+            if end_utc >= u_end_utc:
+                # region window ends after the user's day; move back a day
+                start -= timedelta(days=1)
+                end -= timedelta(days=1)
+                base_day -= timedelta(days=1)
+                continue
+            break
     # If now is already past the base window (and days_offset is 0), shift to next day
     if days_offset == 0:
         earliest = max(start, now_local + timedelta(minutes=5))

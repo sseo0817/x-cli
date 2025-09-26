@@ -958,6 +958,20 @@ def build_parser() -> argparse.ArgumentParser:
     pupd.add_argument("--json", action="store_true", help="output JSON result")
     pupd.set_defaults(func=cmd_update_simple)
 
+    # details: show full text and when for a given internal id
+    pdet = sub.add_parser(
+        "detail",
+        help="show full details for an internal id",
+        description=(
+            "Show full text and timing for a scheduled/posted item by internal id. "
+            "Uses schedule first, then falls back to journal."
+        ),
+    )
+    pdet.add_argument("id", help="internal id from schedule/monitor")
+    pdet.add_argument("--tz", help="IANA timezone for display (default: HKT)")
+    pdet.add_argument("--json", action="store_true", help="output JSON details")
+    pdet.set_defaults(func=cmd_detail)
+
     return p
 
 
@@ -1036,6 +1050,56 @@ def cmd_update_simple(args: argparse.Namespace) -> int:
         print_json(j)
     else:
         print(f"\033[32mupdated: id={j['id']} at={j['time_utc']} tz={j['tz']}\033[0m")
+    return 0
+
+
+def cmd_detail(args: argparse.Namespace) -> int:
+    tz = args.tz or "HKT"
+    # Try schedule first
+    j = get_job(args.id)
+    if j:
+        out = {
+            "id": j.get("id"),
+            "status": j.get("status"),
+            "time_local": iso_utc_to_local_hms(j.get("time_utc", ""), tz) if j.get("time_utc") else None,
+            "tz": tz,
+            "text": j.get("text"),
+            "tweet_id": j.get("posted_tweet_id"),
+        }
+        if args.json:
+            print_json(out)
+        else:
+            print(f"ID: {out['id']}  Status: {out['status']}")
+            if out["time_local"]:
+                print(f"When({tz}): {out['time_local']}")
+            if out.get("tweet_id"):
+                print(f"URL: https://x.com/i/web/status/{out['tweet_id']}")
+            print("Text:\n" + (out.get("text") or ""))
+        return 0
+    # Fallback to journal
+    rec = journal_find_by_id(args.id)
+    if not rec:
+        print("\033[31mnot found\033[0m", file=sys.stderr)
+        return 1
+    when_local = iso_utc_to_local_hms(rec.get("posted_at", ""), tz) if rec.get("posted_at") else None
+    out = {
+        "id": rec.get("id"),
+        "status": rec.get("status", "posted"),
+        "time_local": when_local,
+        "tz": tz,
+        "text": rec.get("text"),
+        "tweet_id": rec.get("tweet_id"),
+        "source": rec.get("source"),
+    }
+    if args.json:
+        print_json(out)
+    else:
+        print(f"ID: {out['id']}  Status: {out['status']}  Source: {out.get('source') or ''}")
+        if out["time_local"]:
+            print(f"When({tz}): {out['time_local']}")
+        if out.get("tweet_id"):
+            print(f"URL: https://x.com/i/web/status/{out['tweet_id']}")
+        print("Text:\n" + (out.get("text") or ""))
     return 0
 
 
