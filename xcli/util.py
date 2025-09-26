@@ -6,6 +6,7 @@ import socket
 import errno
 from datetime import datetime, timezone, timedelta
 import re
+import random
 from typing import Any, Dict, List, Optional, Tuple
 
 from dateutil import parser as dtparser
@@ -81,12 +82,22 @@ def default_tz_from_name(name: Optional[str]) -> dttz.tzoffset:
 
 
 def parse_time_to_utc(ts: str, tz_name: Optional[str]) -> Tuple[str, str]:
-    tzinfo = default_tz_from_name(tz_name)
-    dt = dtparser.parse(ts)
+    """Parse user input into UTC ISO + tz name.
+
+    Supports:
+    - Absolute ISO / 'YYYY-MM-DD HH:MM'
+    - Shorthand 'HH:MM' (next occurrence in tz)
+    - Prime time keywords (e.g., 'NY evening')
+    - Day-offset prefixes: '{N}d HH:MM' or '{N}d {prime time}'
+    """
+    # Normalize with keywords and day offsets first to a local ISO string
+    local_iso, tz_resolved, _ = resolve_time_spec(ts, tz_name)
+    tzinfo = default_tz_from_name(tz_resolved)
+    dt = dtparser.parse(local_iso)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tzinfo)
     dt_utc = dt.astimezone(timezone.utc)
-    return dt_utc.isoformat(), (tz_name or "HKT")
+    return dt_utc.isoformat(), (tz_resolved or "HKT")
 
 
 def resolve_time_spec(ts: str, tz_name: Optional[str]) -> Tuple[str, str, bool]:
@@ -96,6 +107,18 @@ def resolve_time_spec(ts: str, tz_name: Optional[str]) -> Tuple[str, str, bool]:
     Otherwise, returns (ts, tz_used, False).
     """
     tz_used = tz_name or "HKT"
+    # Day-offset prefix like '2d ...'
+    days_offset = 0
+    m_off = re.match(r"^(\d+)d\s+(.+)$", ts.strip(), re.IGNORECASE) if isinstance(ts, str) else None
+    remainder = ts
+    if m_off:
+        days_offset = int(m_off.group(1))
+        remainder = m_off.group(2)
+    # Prime time keywords
+    # Prime time keywords: always pick a random time within the chosen window
+    kw_local, kw_tz, is_kw = _resolve_prime_time_keyword(remainder, prefer_earliest=False, days_offset=days_offset)
+    if is_kw:
+        return kw_local, kw_tz or tz_used, True
     if re.fullmatch(r"\d{1,2}:\d{2}", ts):
         tzinfo = default_tz_from_name(tz_used)
         now_local = datetime.now(tzinfo)
@@ -103,8 +126,94 @@ def resolve_time_spec(ts: str, tz_name: Optional[str]) -> Tuple[str, str, bool]:
         target = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
         if target <= now_local:
             target = target + timedelta(days=1)
+        # Apply days offset if provided
+        if days_offset:
+            target = target + timedelta(days=days_offset - 1)  # we already advanced to next occurrence
+        # Enforce at least 5 minutes in future
+        if target <= now_local + timedelta(minutes=5):
+            raise ValueError("Scheduled time must be at least 5 minutes in the future")
         return target.isoformat(), tz_used, True
     return ts, tz_used, False
+
+
+_PRIME_WINDOWS = {
+    # region: (tz, {period: (start_hour, end_hour_exclusive)})
+    "EU": ("Europe/Berlin", {"morning": (8, 11), "noon": (12, 14), "evening": (18, 22)}),
+    "NY": ("America/New_York", {"morning": (8, 11), "noon": (12, 14), "evening": (18, 22)}),
+    "CA": ("America/Los_Angeles", {"morning": (8, 11), "noon": (12, 14), "evening": (18, 22)}),
+    "ASIA": ("Asia/Hong_Kong", {"morning": (9, 12), "noon": (12, 14), "evening": (19, 22)}),
+}
+
+_REGION_ALIASES = {
+    "EU": {"EU", "EUROPE"},
+    "NY": {"NY", "NYC", "NEWYORK", "NEW_YORK"},
+    "CA": {"CA", "CALIFORNIA", "SF", "BAY", "LA", "LOSANGELES", "LOS_ANGELES"},
+    "ASIA": {"ASIA", "HK", "HONGKONG", "HONG_KONG", "SG", "SINGAPORE"},
+}
+
+
+def _match_region(token: str) -> Optional[str]:
+    t = re.sub(r"\s+|[_-]", "", token).upper()
+    for key, aliases in _REGION_ALIASES.items():
+        if t in aliases:
+            return key
+    return None
+
+
+def _resolve_prime_time_keyword(spec: str, *, prefer_earliest: bool = False, days_offset: int = 0) -> Tuple[str, Optional[str], bool]:
+    """If spec matches a prime time keyword like 'EU morning', return a concrete
+    local ISO time within the next occurrence of that window, and its timezone name.
+
+    Returns (local_iso_with_tz, tz_used, is_keyword)
+    """
+    if not isinstance(spec, str):
+        return spec, None, False  # type: ignore
+    s = spec.strip()
+    m = re.match(r"^(?P<region>[A-Za-z_\s]+)\s+(?P<part>morning|noon|non|evening)$", s, re.IGNORECASE)
+    if not m:
+        return spec, None, False
+    region_raw = m.group("region")
+    part = m.group("part").lower()
+    if part == "non":
+        part = "noon"
+    region = _match_region(region_raw)
+    if region is None or region not in _PRIME_WINDOWS:
+        return spec, None, False
+    tz_name = _PRIME_WINDOWS[region][0]
+    tzinfo = dttz.gettz(tz_name)
+    if tzinfo is None:
+        tzinfo = dttz.UTC
+    now_local = datetime.now(tzinfo)
+    start_h, end_h = _PRIME_WINDOWS[region][1].get(part, (None, None))
+    if start_h is None:
+        return spec, None, False
+    # Anchor base day with days_offset
+    base_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
+    start = base_day.replace(hour=start_h, minute=0, second=0, microsecond=0)
+    end = base_day.replace(hour=end_h, minute=0, second=0, microsecond=0)
+    # If now is already past the base window (and days_offset is 0), shift to next day
+    if days_offset == 0:
+        earliest = max(start, now_local + timedelta(minutes=5))
+        if earliest >= end:
+            start = start + timedelta(days=1)
+            end = end + timedelta(days=1)
+            earliest = start
+    else:
+        earliest = start
+        # For exact future date, enforce 5-minute rule only if it's today
+        if (start.date() == now_local.date()) and earliest <= now_local + timedelta(minutes=5):
+            raise ValueError("Scheduled time must be at least 5 minutes in the future")
+    # Choose time inside window
+    if prefer_earliest:
+        target = earliest
+    else:
+        total_seconds = int((end - earliest).total_seconds())
+        if total_seconds <= 60:
+            target = earliest
+        else:
+            offset = random.randint(0, total_seconds - 60)
+            target = earliest + timedelta(seconds=offset)
+    return target.isoformat(), tz_name, True
 
 
 def iso_utc_to_local_str(iso_utc: str, tz_name: Optional[str]) -> str:

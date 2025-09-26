@@ -4,7 +4,8 @@ import argparse
 import json
 import sys
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 import os
 import time
 import stat
@@ -14,7 +15,7 @@ from .runner import run_once, runner_status
 from .api import post_tweet, ApiError, get_tweet, auth_status
 from .utils.openai_client import LLMClient
 from .cronctl import cron_on, cron_off, cron_status
-from .util import append_journal, now_utc, gen_id, read_journal, resolve_time_spec, parse_time_to_utc, iso_utc_to_local_str, resolve_since, journal_find_by_id, cron_log_default_path, iso_utc_to_local_hms
+from .util import append_journal, now_utc, gen_id, read_journal, resolve_time_spec, parse_time_to_utc, iso_utc_to_local_str, resolve_since, journal_find_by_id, cron_log_default_path, iso_utc_to_local_hms, load_schedule
 
 
 def print_json(data: Any) -> None:
@@ -93,7 +94,9 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         if args.json:
             print_json(job)
         else:
-            print(f"\033[32mscheduled: id={job['id']} at={job['time_utc']} tz={job['tz']}\033[0m")
+            # Show local timezone time for clarity
+            local_at = iso_utc_to_local_hms(job['time_utc'], job['tz']) if job.get('time_utc') else ''
+            print(f"\033[32mscheduled: id={job['id']} at_local={local_at} tz={job['tz']}\033[0m")
         return 0
     elif args.action == "monitor":
         if args.id:
@@ -190,6 +193,142 @@ def format_jobs_table(rows: list[dict], tz: str | None = None) -> str:
 def _text_snippet(text: str, width: int = 40) -> str:
     first = text.splitlines()[0] if text else ""
     return (first[:width] + ("..." if first else "")) if len(first) > 0 else ""
+
+
+# Non-overlapping prime time slots in UTC, in order
+_PRIME_SLOTS = [
+    ("NY evening", 22, 1),   # wraps to next day
+    ("CA evening", 1, 5),
+    ("Asia morning", 5, 8),
+    ("EU morning", 8, 11),
+    ("EU noon", 11, 12),
+    ("NY morning", 12, 15),
+    ("CA morning", 15, 19),
+    ("CA noon", 19, 22),
+]
+
+
+def _prime_slot_bounds_utc(day0: datetime, start_h: int, end_h: int) -> tuple[datetime, datetime]:
+    """Return (start,end) for the slot whose LABEL is this day0 (UTC midnight of label day).
+
+    For wrap slots (e.g., 22→01), the label corresponds to the END date, so:
+      start = (day0 - 1day) at 22:00, end = day0 at 01:00.
+    For non-wrap, both start/end are on day0.
+    """
+    if start_h <= end_h:
+        return day0.replace(hour=start_h), day0.replace(hour=end_h)
+    prev = day0 - timedelta(days=1)
+    return prev.replace(hour=start_h), day0.replace(hour=end_h)
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _ansi_strip(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
+
+def _pad_ansi(s: str, width: int, align: str = "left") -> str:
+    raw = _ansi_strip(s)
+    pad = max(0, width - len(raw))
+    if align == "center":
+        left = pad // 2
+        right = pad - left
+        return (" " * left) + s + (" " * right)
+    elif align == "right":
+        return (" " * pad) + s
+    return s + (" " * pad)
+
+
+def _print_prime_time_coverage(days: int = 10) -> None:
+    # Prepare future days starting today (UTC midnights)
+    now = now_utc()
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    days_utc = [day0 + timedelta(days=i) for i in range(days)]
+    dates = [d.strftime("%m-%d") for d in days_utc]
+    date_labels = [f"{dates[i]} ({i}d)" for i in range(len(dates))]
+    # Collect future pending jobs
+    sched = load_schedule()
+    jobs = [j for j in sched.get("jobs", []) if j.get("status") == "pending"]
+    # Column widths (slightly wider to give breathing room)
+    label_w = max(14, max(len(lbl) for lbl, *_ in _PRIME_SLOTS))
+    date_w = max(10, max(len(s) for s in date_labels))
+    colw = [label_w] + [date_w] * len(date_labels)
+
+    # Helpers to draw box borders (no ANSI inside borders)
+    def border(top: bool = False, mid: bool = False, bottom: bool = False) -> str:
+        if top:
+            left, sep, right, fill = "┌", "┬", "┐", "─"
+        elif bottom:
+            left, sep, right, fill = "└", "┴", "┘", "─"
+        elif mid:
+            left, sep, right, fill = "├", "┼", "┤", "─"
+        else:
+            left, sep, right, fill = "│", "│", "│", " "
+        parts = [left]
+        for i, w in enumerate(colw):
+            parts.append(fill * w)
+            parts.append(sep if i < len(colw) - 1 else right)
+        return "".join(parts)
+
+    def fmt_row(cells: list[str]) -> str:
+        parts = ["│"]
+        for i, c in enumerate(cells):
+            # Center align all cells for a uniform look
+            parts.append(_pad_ansi(c, colw[i], align="center"))
+            parts.append("│")
+        return "".join(parts)
+
+    # Header
+    print(border(top=True))
+    hdr_cells = ["Prime / UTC"] + date_labels
+    if _use_color():
+        hdr_cells[0] = "\033[1;36m" + hdr_cells[0] + "\033[0m"
+        hdr_cells[1:] = ["\033[2m" + d + "\033[0m" for d in hdr_cells[1:]]
+    print(fmt_row(hdr_cells))
+    print(border(mid=True))
+
+    # Rows per slot
+    for label, sh, eh in _PRIME_SLOTS:
+        label_cell = ("\033[36m" + label + "\033[0m") if _use_color() else label
+        cells = [label_cell]
+        for i, d0 in enumerate(days_utc):
+            start, end = _prime_slot_bounds_utc(d0, sh, eh)
+            # Is there any pending job in [start, end)?
+            has = False
+            for j in jobs:
+                t = j.get("time_utc")
+                if not t:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(t)
+                except Exception:
+                    continue
+                if start <= dt < end:
+                    has = True
+                    break
+            # Use double block for better visibility
+            symbol = "██"
+            # Grey if slot already past relative to now (end no later than now+5m)
+            past = end <= (now + timedelta(minutes=5))
+            if _use_color():
+                if past:
+                    symbol = f"\033[90m{symbol}\033[0m"  # grey
+                else:
+                    symbol = f"\033[32m{symbol}\033[0m" if has else f"\033[31m{symbol}\033[0m"
+            cells.append(symbol)
+        print(fmt_row(cells))
+    print(border(bottom=True))
+
+    # Legend
+    if _use_color():
+        green = "\033[32m██\033[0m"
+        red = "\033[31m██\033[0m"
+        grey = "\033[90m██\033[0m"
+    else:
+        green = red = grey = "██"
+    legend = f"Legend: {green}=scheduled  {red}=empty  {grey}=past"
+    print(legend)
 
 
 def format_journal_table(rows: list[dict], tz: str | None = None) -> str:
@@ -336,6 +475,10 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     items.sort(key=lambda r: r.get("posted_at", ""))
     print("\nHistory\n" + "\033[2m" + ("─" * 40) + "\033[0m")
     print(format_journal_table(items, tz=args.tz))
+
+    # Prime time coverage at the bottom
+    print("\nPrime Time Coverage (next 10 days)\n" + "\033[2m" + ("─" * 40) + "\033[0m")
+    _print_prime_time_coverage()
     return 0
 
 
@@ -609,9 +752,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Examples:\n"
-            "  x schedule assign --text 'Hello' --at '2025-09-14 21:00' --tz HKT\n"
-            "  x schedule monitor --since '2025-09-14'\n"
-            "  x monitor --since '2025-09-14'\n"
+            "  x schedule --text 'Hello' --at '2025-09-14 21:00' --tz HKT\n"
+            "  x schedule --text 'Hello EU' --at 'EU morning'\n"
+            "  x schedule --text 'Hello in 2d noon' --at '2d NY noon'\n"
+            "  x update <id> --at '2025-09-14 22:30'\n"
+            "  x remove <id>\n"
+            "  x monitor\n"
             "  x post --text 'Ship it'\n"
             "  x run-once\n"
             "  x cron on --repo .\n"
@@ -626,11 +772,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="manage scheduled posts (assign, monitor, update, remove)",
         description=(
             "Schedule one-off posts and manage them. Times default to HKT unless --tz is set.\n"
-            "Use ISO8601 or 'YYYY-MM-DD HH:MM' for --at."
+            "--at supports ISO ('YYYY-MM-DD HH:MM'), shorthand 'HH:MM' (next occurrence), 'Nd ...' day offsets,\n"
+            "and prime-time keywords like 'EU morning' (random time within that window).\n"
+            "Default action: 'assign' when omitted."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    ps.add_argument("action", choices=["assign", "monitor", "update", "remove"])
+    # If no action is provided, default to 'assign' so `x schedule` behaves like `x schedule assign`.
+    ps.add_argument("action", nargs="?", choices=["assign", "monitor", "update", "remove"], default="assign")
     ps.add_argument("--text", help="post text content (required for assign; optional for update)")
     ps.add_argument("--at", help="scheduled time (ISO8601, 'YYYY-MM-DD HH:MM', or 'HH:MM' for next occurrence)")
     ps.add_argument("--tz", help="IANA timezone name (default: HKT)")
@@ -787,6 +936,28 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--json", action="store_true", help="output JSON instead of formatted text")
     pd.set_defaults(func=cmd_ai_proofread)
 
+    # simple aliases: remove / update at top-level
+    prmv = sub.add_parser(
+        "remove",
+        help="remove a scheduled job (alias of 'schedule remove')",
+        description="Remove a scheduled job by id.",
+    )
+    prmv.add_argument("id", help="job id to remove")
+    prmv.add_argument("--json", action="store_true", help="output JSON result")
+    prmv.set_defaults(func=cmd_remove_simple)
+
+    pupd = sub.add_parser(
+        "update",
+        help="update a scheduled job (alias of 'schedule update')",
+        description="Update a job's time and/or text by id.",
+    )
+    pupd.add_argument("id", help="job id to update")
+    pupd.add_argument("--at", help="new scheduled time (ISO, 'YYYY-MM-DD HH:MM', or 'HH:MM')")
+    pupd.add_argument("--text", help="new text (omit to keep current)")
+    pupd.add_argument("--tz", help="IANA timezone name for interpreting --at (default: HKT)")
+    pupd.add_argument("--json", action="store_true", help="output JSON result")
+    pupd.set_defaults(func=cmd_update_simple)
+
     return p
 
 
@@ -837,6 +1008,34 @@ def cmd_tweet_show(args: argparse.Namespace) -> int:
     print(f"Tweet ID: {tid}")
     print(f"URL: https://x.com/i/web/status/{tid}")
     print("Text:\n" + text)
+    return 0
+
+
+def cmd_remove_simple(args: argparse.Namespace) -> int:
+    ok = remove_job(args.id)
+    if args.json:
+        print_json({"ok": ok, "id": args.id})
+    else:
+        print("\033[32mremoved\033[0m" if ok else "\033[31mjob not found\033[0m")
+    return 0 if ok else 1
+
+
+def cmd_update_simple(args: argparse.Namespace) -> int:
+    if not args.at and not args.text:
+        print("--at or --text is required", file=sys.stderr)
+        return 2
+    try:
+        j = update_job(args.id, text=args.text, at=args.at, tz_name=args.tz)
+    except KeyError as e:
+        if args.json:
+            print_json({"ok": False, "error": str(e)})
+        else:
+            print(str(e), file=sys.stderr)
+        return 1
+    if args.json:
+        print_json(j)
+    else:
+        print(f"\033[32mupdated: id={j['id']} at={j['time_utc']} tz={j['tz']}\033[0m")
     return 0
 
 

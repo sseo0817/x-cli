@@ -47,11 +47,22 @@ The CLI automatically loads `.env` from the current directory using python-doten
 ### Schedule a post
 
 ```
-x schedule assign --text "Hello from scheduler" --at "2025-09-14 21:00" --tz HKT
+# Default action is assign, so this works:
+x schedule --text "Hello from scheduler" --at "2025-09-14 21:00" --tz HKT
 ```
 
 Notes:
 - `--at` accepts ISO8601 or `YYYY-MM-DD HH:MM` in the provided timezone (default HKT).
+- It also supports:
+  - Shorthand `HH:MM` (next occurrence in `--tz`).
+  - Day offsets with time or prime-time: `Nd HH:MM` or `Nd {prime time}` (e.g., `2d 11:30`, `3d NY noon`).
+  - Prime-time keywords (random time within the window, at least 5 minutes in the future):
+    - `EU morning`, `EU noon`, `EU evening` (Europe/Berlin)
+    - `NY morning`, `NY noon`, `NY evening` (America/New_York)
+    - `CA morning`, `CA noon`, `CA evening` (America/Los_Angeles)
+    - `Asia morning`, `Asia noon`, `Asia evening` (Asia/Hong_Kong)
+- For prime-times: if today's window has passed, it picks within the next day's window; if currently inside the window, it picks a time later in the same window today. All picks enforce a ≥5 minute buffer from now.
+- Scheduled confirmation now shows the time in the selected local timezone for clarity.
 - Time is normalized to UTC for storage.
 
 ### Monitor scheduled items
@@ -73,9 +84,10 @@ Add `--json` for machine-readable output.
 ### Update or remove
 
 ```
-x schedule update --id <job_id> --at "2025-09-14 22:30" --tz HKT
-x schedule update --id <job_id> --text "New content"
-x schedule remove --id <job_id>
+# Shortcuts
+x update <job_id> --at "2025-09-14 22:30" --tz HKT
+x update <job_id> --text "New content"
+x remove <job_id>
 ```
 
 ### Post immediately

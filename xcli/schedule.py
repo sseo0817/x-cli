@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from .util import (
     load_schedule,
@@ -18,8 +18,8 @@ def add_job(text: str, at: str, tz_name: Optional[str]) -> Dict[str, Any]:
     schedule = load_schedule()
     time_utc_iso, tz_used = parse_time_to_utc(at, tz_name)
     dt_utc = datetime.fromisoformat(time_utc_iso)
-    if dt_utc <= now_utc():
-        raise ValueError("Scheduled time must be in the future")
+    if dt_utc <= now_utc() + timedelta(minutes=5):
+        raise ValueError("Scheduled time must be at least 5 minutes in the future")
     job_id = gen_id()
     idem = compute_idempotency_key(text, time_utc_iso)
     job = {
