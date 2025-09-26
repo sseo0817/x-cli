@@ -15,7 +15,7 @@ from .runner import run_once, runner_status
 from .api import post_tweet, ApiError, get_tweet, auth_status
 from .utils.openai_client import LLMClient
 from .cronctl import cron_on, cron_off, cron_status
-from .util import append_journal, now_utc, gen_id, read_journal, resolve_time_spec, parse_time_to_utc, iso_utc_to_local_str, resolve_since, journal_find_by_id, cron_log_default_path, iso_utc_to_local_hms, load_schedule
+from .util import append_journal, now_utc, gen_id, read_journal, resolve_time_spec, parse_time_to_utc, iso_utc_to_local_str, resolve_since, journal_find_by_id, cron_log_default_path, iso_utc_to_local_hms, load_schedule, default_tz_from_name
 
 
 def print_json(data: Any) -> None:
@@ -1055,26 +1055,53 @@ def cmd_update_simple(args: argparse.Namespace) -> int:
 
 def cmd_detail(args: argparse.Namespace) -> int:
     tz = args.tz or "HKT"
+    tzinfo = default_tz_from_name(tz)
     # Try schedule first
     j = get_job(args.id)
     if j:
+        # compute when/length
+        time_utc = j.get("time_utc")
+        time_local = iso_utc_to_local_hms(time_utc, tz) if time_utc else None
+        rel = None
+        if time_utc:
+            dt = datetime.fromisoformat(time_utc).astimezone(tzinfo)
+            now_l = datetime.now(tzinfo)
+            delta = int((dt - now_l).total_seconds())
+            if delta >= 0:
+                rel = humanize_delta(delta)
+            else:
+                rel = humanize_delta(abs(delta)).replace("in ", "") + " ago"
+        text = j.get("text") or ""
+        words = len(text.split())
+        chars = len(text)
         out = {
             "id": j.get("id"),
             "status": j.get("status"),
-            "time_local": iso_utc_to_local_hms(j.get("time_utc", ""), tz) if j.get("time_utc") else None,
+            "at": time_local,
+            "when": rel,
             "tz": tz,
-            "text": j.get("text"),
+            "text": text,
             "tweet_id": j.get("posted_tweet_id"),
+            "words": words,
+            "chars": chars,
         }
         if args.json:
             print_json(out)
         else:
             print(f"ID: {out['id']}  Status: {out['status']}")
-            if out["time_local"]:
-                print(f"When({tz}): {out['time_local']}")
+            if out["at"]:
+                print(f"at({tz}): {out['at']}")
+            if out["when"]:
+                print(f"when: {out['when']}")
+            # length with coloring
+            cc = f"{chars}"
+            if _use_color():
+                cc = f"\033[31m{chars}\033[0m" if chars > 280 else f"\033[32m{chars}\033[0m"
+            print(f"length: words={words} chars={cc}")
             if out.get("tweet_id"):
                 print(f"URL: https://x.com/i/web/status/{out['tweet_id']}")
-            print("Text:\n" + (out.get("text") or ""))
+            print("\033[2m" + ("─" * 40) + "\033[0m")
+            print(text)
         return 0
     # Fallback to journal
     rec = journal_find_by_id(args.id)
@@ -1082,24 +1109,47 @@ def cmd_detail(args: argparse.Namespace) -> int:
         print("\033[31mnot found\033[0m", file=sys.stderr)
         return 1
     when_local = iso_utc_to_local_hms(rec.get("posted_at", ""), tz) if rec.get("posted_at") else None
+    # compute relative and length
+    rel = None
+    if rec.get("posted_at"):
+        dt = datetime.fromisoformat(rec.get("posted_at")).astimezone(tzinfo)  # type: ignore
+        now_l = datetime.now(tzinfo)
+        delta = int((dt - now_l).total_seconds())
+        if delta >= 0:
+            rel = humanize_delta(delta)
+        else:
+            rel = humanize_delta(abs(delta)).replace("in ", "") + " ago"
+    text = rec.get("text") or ""
+    words = len(text.split())
+    chars = len(text)
     out = {
         "id": rec.get("id"),
         "status": rec.get("status", "posted"),
-        "time_local": when_local,
+        "at": when_local,
+        "when": rel,
         "tz": tz,
         "text": rec.get("text"),
         "tweet_id": rec.get("tweet_id"),
         "source": rec.get("source"),
+        "words": words,
+        "chars": chars,
     }
     if args.json:
         print_json(out)
     else:
         print(f"ID: {out['id']}  Status: {out['status']}  Source: {out.get('source') or ''}")
-        if out["time_local"]:
-            print(f"When({tz}): {out['time_local']}")
+        if out["at"]:
+            print(f"at({tz}): {out['at']}")
+        if out["when"]:
+            print(f"when: {out['when']}")
+        cc = f"{chars}"
+        if _use_color():
+            cc = f"\033[31m{chars}\033[0m" if chars > 280 else f"\033[32m{chars}\033[0m"
+        print(f"length: words={words} chars={cc}")
         if out.get("tweet_id"):
             print(f"URL: https://x.com/i/web/status/{out['tweet_id']}")
-        print("Text:\n" + (out.get("text") or ""))
+        print("\033[2m" + ("─" * 40) + "\033[0m")
+        print(text)
     return 0
 
 

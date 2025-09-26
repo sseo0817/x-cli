@@ -243,6 +243,16 @@ def _resolve_prime_time_keyword(
         # For exact future date, enforce 5-minute rule only if it's today
         if (start.date() == now_local.date()) and earliest <= now_local + timedelta(minutes=5):
             raise ValueError("Scheduled time must be at least 5 minutes in the future")
+    # Ensure N-day semantics in elapsed time when anchoring to user's tz
+    if anchor_tz and days_offset > 0:
+        min_dt_reg = (datetime.now(timezone.utc) + timedelta(days=days_offset, minutes=5)).astimezone(tzinfo)
+        if earliest < min_dt_reg:
+            earliest = min_dt_reg
+            if earliest >= end:
+                # move to next day's window
+                start = start + timedelta(days=1)
+                end = end + timedelta(days=1)
+                earliest = start
     # Choose time inside window
     if prefer_earliest:
         target = earliest

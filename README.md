@@ -62,6 +62,9 @@ Notes:
     - `CA morning`, `CA noon`, `CA evening` (America/Los_Angeles)
     - `Asia morning`, `Asia noon`, `Asia evening` (Asia/Hong_Kong)
 - For prime-times: if today's window has passed, it picks within the next day's window; if currently inside the window, it picks a time later in the same window today. All picks enforce a ≥5 minute buffer from now.
+- Nd semantics (anchoring and elapsed time):
+  - Day offsets (`Nd ...`) anchor to your display timezone (`--tz`, default HKT) and then map to the target region's window/date.
+  - Additionally, the scheduled time is guaranteed to be at least `N` days + 5 minutes ahead in elapsed time. If the mapped window would be earlier than that (due to timezone differences or wraparound), it shifts forward to the next applicable window.
 - Scheduled confirmation now shows the time in the selected local timezone for clarity.
 - Time is normalized to UTC for storage.
 
