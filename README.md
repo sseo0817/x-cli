@@ -55,16 +55,15 @@ Notes:
 - `--at` accepts ISO8601 or `YYYY-MM-DD HH:MM` in the provided timezone (default HKT).
 - It also supports:
   - Shorthand `HH:MM` (next occurrence in `--tz`).
-  - Day offsets with time or prime-time: `Nd HH:MM` or `Nd {prime time}` (e.g., `2d 11:30`, `3d NY noon`).
-  - Prime-time keywords (random time within the window, at least 5 minutes in the future):
-    - `EU morning`, `EU noon`, `EU evening` (Europe/Berlin)
-    - `NY morning`, `NY noon`, `NY evening` (America/New_York)
-    - `CA morning`, `CA noon`, `CA evening` (America/Los_Angeles)
-    - `Asia morning`, `Asia noon`, `Asia evening` (Asia/Hong_Kong)
-- For prime-times: if today's window has passed, it picks within the next day's window; if currently inside the window, it picks a time later in the same window today. All picks enforce a ≥5 minute buffer from now.
-- Nd semantics (anchoring and elapsed time):
-  - Day offsets (`Nd ...`) anchor to your display timezone (`--tz`, default HKT) and then map to the target region's window/date.
-  - Additionally, the scheduled time is guaranteed to be at least `N` days + 5 minutes ahead in elapsed time. If the mapped window would be earlier than that (due to timezone differences or wraparound), it shifts forward to the next applicable window.
+  - Day offsets with time or prime-time: `Nd HH:MM` or `Nd {prime time}` (e.g., `2d 11:30`, `3d EU morning`).
+  - Prime-time keywords (random time within the monitor grid slot, at least 5 minutes in the future):
+    - `NY evening`, `CA evening`
+    - `Asia morning`
+    - `EU morning`, `EU noon`
+    - `NY morning`
+    - `CA morning`, `CA noon`
+- Prime-time slots mirror the rows in the coverage grid printed by `x schedule monitor`. Scheduling `Nd {prime}` lights up the matching column/row; if the requested slot has already elapsed, it rolls forward to the next day's slot with the same label.
+- Nd semantics: day offsets align with the monitor grid columns (UTC midnights). All picks still enforce a ≥5 minute buffer from now.
 - Scheduled confirmation now shows the time in the selected local timezone for clarity.
 - Time is normalized to UTC for storage.
 

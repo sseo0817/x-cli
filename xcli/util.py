@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dateutil import parser as dtparser
 from dateutil import tz as dttz
 
+from .prime_slots import resolve_prime_slot, prime_slot_bounds_utc
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".x-cli")
 # Attempt to ensure home config dir, fall back to project-local .x-cli if not permitted
@@ -141,30 +142,6 @@ def resolve_time_spec(ts: str, tz_name: Optional[str]) -> Tuple[str, str, bool]:
     return ts, tz_used, False
 
 
-_PRIME_WINDOWS = {
-    # region: (tz, {period: (start_hour, end_hour_exclusive)})
-    "EU": ("Europe/Berlin", {"morning": (8, 11), "noon": (12, 14), "evening": (18, 22)}),
-    "NY": ("America/New_York", {"morning": (8, 11), "noon": (12, 14), "evening": (18, 22)}),
-    "CA": ("America/Los_Angeles", {"morning": (8, 11), "noon": (12, 14), "evening": (18, 22)}),
-    "ASIA": ("Asia/Hong_Kong", {"morning": (9, 12), "noon": (12, 14), "evening": (19, 22)}),
-}
-
-_REGION_ALIASES = {
-    "EU": {"EU", "EUROPE"},
-    "NY": {"NY", "NYC", "NEWYORK", "NEW_YORK"},
-    "CA": {"CA", "CALIFORNIA", "SF", "BAY", "LA", "LOSANGELES", "LOS_ANGELES"},
-    "ASIA": {"ASIA", "HK", "HONGKONG", "HONG_KONG", "SG", "SINGAPORE"},
-}
-
-
-def _match_region(token: str) -> Optional[str]:
-    t = re.sub(r"\s+|[_-]", "", token).upper()
-    for key, aliases in _REGION_ALIASES.items():
-        if t in aliases:
-            return key
-    return None
-
-
 def _resolve_prime_time_keyword(
     spec: str,
     *,
@@ -179,91 +156,40 @@ def _resolve_prime_time_keyword(
     """
     if not isinstance(spec, str):
         return spec, None, False  # type: ignore
-    s = spec.strip()
-    m = re.match(r"^(?P<region>[A-Za-z_\s]+)\s+(?P<part>morning|noon|non|evening)$", s, re.IGNORECASE)
-    if not m:
+    slot = resolve_prime_slot(spec)
+    if slot is None:
         return spec, None, False
-    region_raw = m.group("region")
-    part = m.group("part").lower()
-    if part == "non":
-        part = "noon"
-    region = _match_region(region_raw)
-    if region is None or region not in _PRIME_WINDOWS:
-        return spec, None, False
-    tz_name = _PRIME_WINDOWS[region][0]
-    tzinfo = dttz.gettz(tz_name)
-    if tzinfo is None:
-        tzinfo = dttz.UTC
-    now_local = datetime.now(tzinfo)
-    start_h, end_h = _PRIME_WINDOWS[region][1].get(part, (None, None))
-    if start_h is None:
-        return spec, None, False
-    # Anchor base day with days_offset relative to anchor_tz (user tz) if provided
-    if anchor_tz:
-        atz = default_tz_from_name(anchor_tz)
-        now_anch = datetime.now(atz)
-        user_day_start = now_anch.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
-        user_day_end = user_day_start + timedelta(days=1)
-        # Initial guess: map user's day start to region date
-        region_anchor = user_day_start.astimezone(tzinfo)
-        base_day = region_anchor.replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        base_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
-    start = base_day.replace(hour=start_h, minute=0, second=0, microsecond=0)
-    end = base_day.replace(hour=end_h, minute=0, second=0, microsecond=0)
-    # If anchoring to user's tz, ensure the region window's UTC end falls within the user's anchor UTC day
-    if anchor_tz:
-        u_start_utc = user_day_start.astimezone(timezone.utc)
-        u_end_utc = user_day_end.astimezone(timezone.utc)
-        # Adjust base_day by at most one day to fit end within [u_start_utc, u_end_utc)
-        for _ in range(2):
-            end_utc = end.astimezone(timezone.utc)
-            if end_utc < u_start_utc:
-                # region window too early; move forward a day
-                start += timedelta(days=1)
-                end += timedelta(days=1)
-                base_day += timedelta(days=1)
-                continue
-            if end_utc >= u_end_utc:
-                # region window ends after the user's day; move back a day
-                start -= timedelta(days=1)
-                end -= timedelta(days=1)
-                base_day -= timedelta(days=1)
-                continue
-            break
-    # If now is already past the base window (and days_offset is 0), shift to next day
-    if days_offset == 0:
-        earliest = max(start, now_local + timedelta(minutes=5))
-        if earliest >= end:
-            start = start + timedelta(days=1)
-            end = end + timedelta(days=1)
-            earliest = start
-    else:
-        earliest = start
-        # For exact future date, enforce 5-minute rule only if it's today
-        if (start.date() == now_local.date()) and earliest <= now_local + timedelta(minutes=5):
-            raise ValueError("Scheduled time must be at least 5 minutes in the future")
-    # Ensure N-day semantics in elapsed time when anchoring to user's tz
-    if anchor_tz and days_offset > 0:
-        min_dt_reg = (datetime.now(timezone.utc) + timedelta(days=days_offset, minutes=5)).astimezone(tzinfo)
-        if earliest < min_dt_reg:
-            earliest = min_dt_reg
-            if earliest >= end:
-                # move to next day's window
-                start = start + timedelta(days=1)
-                end = end + timedelta(days=1)
-                earliest = start
-    # Choose time inside window
+
+    anchor_name = anchor_tz or "HKT"
+    tzinfo = default_tz_from_name(anchor_name)
+    now = now_utc()
+    base_day0 = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    base_day0 = base_day0 + timedelta(days=days_offset)
+
+    min_allowed = now + timedelta(minutes=5)
+    day_cursor = base_day0
+
+    while True:
+        start_utc, end_utc = prime_slot_bounds_utc(day_cursor, slot)
+        # Enforce future window
+        earliest_utc = max(start_utc, min_allowed)
+        if earliest_utc >= end_utc:
+            day_cursor = day_cursor + timedelta(days=1)
+            continue
+        break
+
     if prefer_earliest:
-        target = earliest
+        target_utc = earliest_utc
     else:
-        total_seconds = int((end - earliest).total_seconds())
+        total_seconds = int((end_utc - earliest_utc).total_seconds())
         if total_seconds <= 60:
-            target = earliest
+            target_utc = earliest_utc
         else:
             offset = random.randint(0, total_seconds - 60)
-            target = earliest + timedelta(seconds=offset)
-    return target.isoformat(), tz_name, True
+            target_utc = earliest_utc + timedelta(seconds=offset)
+
+    target_local = target_utc.astimezone(tzinfo)
+    return target_local.isoformat(), anchor_name, True
 
 
 def iso_utc_to_local_str(iso_utc: str, tz_name: Optional[str]) -> str:

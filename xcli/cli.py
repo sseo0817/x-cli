@@ -16,6 +16,7 @@ from .api import post_tweet, ApiError, get_tweet, auth_status
 from .utils.openai_client import LLMClient
 from .cronctl import cron_on, cron_off, cron_status
 from .util import append_journal, now_utc, gen_id, read_journal, resolve_time_spec, parse_time_to_utc, iso_utc_to_local_str, resolve_since, journal_find_by_id, cron_log_default_path, iso_utc_to_local_hms, load_schedule, default_tz_from_name
+from .prime_slots import PRIME_SLOTS, prime_slot_bounds_utc
 
 
 def print_json(data: Any) -> None:
@@ -195,32 +196,6 @@ def _text_snippet(text: str, width: int = 40) -> str:
     return (first[:width] + ("..." if first else "")) if len(first) > 0 else ""
 
 
-# Non-overlapping prime time slots in UTC, in order
-_PRIME_SLOTS = [
-    ("NY evening", 22, 1),   # wraps to next day
-    ("CA evening", 1, 5),
-    ("Asia morning", 5, 8),
-    ("EU morning", 8, 11),
-    ("EU noon", 11, 12),
-    ("NY morning", 12, 15),
-    ("CA morning", 15, 19),
-    ("CA noon", 19, 22),
-]
-
-
-def _prime_slot_bounds_utc(day0: datetime, start_h: int, end_h: int) -> tuple[datetime, datetime]:
-    """Return (start,end) for the slot whose LABEL is this day0 (UTC midnight of label day).
-
-    For wrap slots (e.g., 22→01), the label corresponds to the END date, so:
-      start = (day0 - 1day) at 22:00, end = day0 at 01:00.
-    For non-wrap, both start/end are on day0.
-    """
-    if start_h <= end_h:
-        return day0.replace(hour=start_h), day0.replace(hour=end_h)
-    prev = day0 - timedelta(days=1)
-    return prev.replace(hour=start_h), day0.replace(hour=end_h)
-
-
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -251,7 +226,7 @@ def _print_prime_time_coverage(days: int = 10) -> None:
     sched = load_schedule()
     jobs = [j for j in sched.get("jobs", []) if j.get("status") == "pending"]
     # Column widths (slightly wider to give breathing room)
-    label_w = max(14, max(len(lbl) for lbl, *_ in _PRIME_SLOTS))
+    label_w = max(14, max(len(slot.label) for slot in PRIME_SLOTS))
     date_w = max(10, max(len(s) for s in date_labels))
     colw = [label_w] + [date_w] * len(date_labels)
 
@@ -289,11 +264,12 @@ def _print_prime_time_coverage(days: int = 10) -> None:
     print(border(mid=True))
 
     # Rows per slot
-    for label, sh, eh in _PRIME_SLOTS:
+    for slot in PRIME_SLOTS:
+        label = slot.label
         label_cell = ("\033[36m" + label + "\033[0m") if _use_color() else label
         cells = [label_cell]
         for i, d0 in enumerate(days_utc):
-            start, end = _prime_slot_bounds_utc(d0, sh, eh)
+            start, end = prime_slot_bounds_utc(d0, slot)
             # Is there any pending job in [start, end)?
             has = False
             for j in jobs:
@@ -773,7 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Schedule one-off posts and manage them. Times default to HKT unless --tz is set.\n"
             "--at supports ISO ('YYYY-MM-DD HH:MM'), shorthand 'HH:MM' (next occurrence), 'Nd ...' day offsets,\n"
-            "and prime-time keywords like 'EU morning' (random time within that window).\n"
+            "and prime-time keywords that map to the monitor grid rows (e.g., 'EU morning', 'NY evening').\n"
             "Default action: 'assign' when omitted."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
